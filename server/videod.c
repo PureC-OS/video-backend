@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 #include "libc/include/purec.h"
 #include "vb_proto.h"
@@ -123,11 +124,46 @@ static bool focusable(const struct window *w)
     return w && !w->minimized && (w->role == VB_ROLE_NORMAL || w->role == VB_ROLE_BACKGROUND);
 }
 
+#define COLOR_BACKGROUND 0x11111Bu
+#define HOLD_MS 1500u
+
+static uint64_t hold_until;
+
+static uint64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static bool has_content(void)
+{
+    for (int i = 0; i < stack_n; i++)
+        if (!stack[i]->minimized && (stack[i]->role == VB_ROLE_BACKGROUND || stack[i]->role == VB_ROLE_NORMAL))
+            return true;
+    return false;
+}
+
+static void hold_frame(void)
+{
+    hold_until = now_ms() + HOLD_MS;
+}
+
+static bool holding(void)
+{
+    if (!hold_until)
+        return false;
+    if (now_ms() < hold_until)
+        return true;
+    hold_until = 0;
+    return false;
+}
+
 static uint32_t background(int x, int y)
 {
     (void)x;
-    uint32_t t = screen_h ? (uint32_t)y * 64u / (uint32_t)screen_h : 0;
-    return ((0x10u + t / 4) << 16) | ((0x18u + t / 3) << 8) | (0x2Au + t);
+    (void)y;
+    return COLOR_BACKGROUND;
 }
 
 static uint32_t *fb_row(int y)
@@ -194,6 +230,8 @@ static void draw_cursor(void)
 
 static void flush(void)
 {
+    if (holding())
+        return;
     bool moved = !cursor_shown || cursor_x != mouse_x || cursor_y != mouse_y;
     struct rect old_cursor = {cursor_x, cursor_y, cursor_x + CURSOR_W, cursor_y + CURSOR_H};
     if (dirty.x0 < dirty.x1) {
@@ -424,6 +462,8 @@ static void destroy_window(struct window *w)
     free(w);
     if (role == VB_ROLE_PANEL)
         update_workarea();
+    if ((role == VB_ROLE_BACKGROUND || role == VB_ROLE_NORMAL) && !has_content())
+        hold_frame();
 }
 
 static void send_error(struct client *c, int code, const char *text)
@@ -555,6 +595,8 @@ static void handle_request(struct client *c, const struct vb_msg *m)
             int x1 = clampi(m->a + m->c, 0, w->w), y1 = clampi(m->b + m->d, 0, w->h);
             if (x0 < x1 && y0 < y1)
                 add_dirty(w->x + x0, w->y + y0, x1 - x0, y1 - y0);
+            if (w->role == VB_ROLE_BACKGROUND || w->role == VB_ROLE_NORMAL)
+                hold_until = 0;
         }
         break;
     case VB_DESTROY:
@@ -840,6 +882,7 @@ int main(int argc, char **argv)
     mouse_y = screen_h / 2;
     workarea = (struct rect){0, 0, screen_w, screen_h};
     add_dirty(0, 0, screen_w, screen_h);
+    hold_frame();
     flush();
     struct pollfd fds[2 + MAX_CLIENTS];
     int owners[2 + MAX_CLIENTS];
