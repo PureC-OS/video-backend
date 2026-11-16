@@ -35,6 +35,8 @@ struct vb_event {
     uint32_t task_id;
     uint32_t task_flags;
     char title[VB_TEXT_MAX];
+    int width, height;
+    int state;
 };
 
 int vb_connect(void);
@@ -60,6 +62,11 @@ void vb_window_damage_all(struct vb_window *window);
 void vb_window_title(struct vb_window *window, const char *title);
 void vb_window_move(struct vb_window *window);
 void vb_window_raise(struct vb_window *window);
+int vb_server_version(void);
+int vb_window_resize(struct vb_window *window, int width, int height);
+void vb_window_set_state(struct vb_window *window, int state);
+void vb_window_start_resize(struct vb_window *window, uint32_t edges);
+void vb_window_set_cursor(struct vb_window *window, int cursor);
 void *vb_window_user(struct vb_window *window);
 void vb_window_set_user(struct vb_window *window, void *user);
 

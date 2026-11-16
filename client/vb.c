@@ -25,6 +25,7 @@ struct vb_window {
 
 static int sock = -1;
 static int screen_w, screen_h;
+static int server_version;
 static int work_x, work_y, work_w, work_h;
 static struct vb_window *windows;
 static struct vb_msg queue[QUEUE_MAX];
@@ -132,16 +133,25 @@ int vb_connect(void)
         sock = -1;
         return -1;
     }
-    struct vb_msg m;
-    memset(&m, 0, sizeof(m));
-    m.type = VB_HELLO;
-    m.a = VB_PROTO_VERSION;
     struct vb_msg r;
-    if (send_msg(&m) < 0 || wait_for(VB_WELCOME, NULL, &r) < 0) {
+    memset(&r, 0, sizeof(r));
+    int version = VB_PROTO_VERSION;
+    for (;;) {
+        struct vb_msg m;
+        memset(&m, 0, sizeof(m));
+        m.type = VB_HELLO;
+        m.a = version;
+        if (send_msg(&m) == 0 && wait_for(VB_WELCOME, NULL, &r) == 0)
+            break;
+        if (sock >= 0 && r.type == VB_ERROR && r.a == VB_ERR_VERSION && version > VB_PROTO_MIN_VERSION) {
+            version--;
+            continue;
+        }
         close(sock);
         sock = -1;
         return -1;
     }
+    server_version = version;
     screen_w = r.a;
     screen_h = r.b;
     work_x = 0;
@@ -368,6 +378,79 @@ void vb_window_raise(struct vb_window *w)
     simple(VB_RAISE, w, 0, 0, 0, 0, NULL);
 }
 
+int vb_server_version(void)
+{
+    return server_version;
+}
+
+int vb_window_resize(struct vb_window *w, int width, int height)
+{
+    if (!w || sock < 0 || server_version < 3 || width <= 0 || height <= 0 || width > VB_MAX_SIZE ||
+        height > VB_MAX_SIZE)
+        return -1;
+    if (width == w->width && height == w->height)
+        return 0;
+    size_t bytes = (size_t)width * (size_t)height * 4;
+    char name[VB_TEXT_MAX];
+    snprintf(name, sizeof(name), "/vb-%d-%u", (int)getpid(), shm_counter++);
+    int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0)
+        return -1;
+    if (ftruncate(fd, (off_t)bytes) < 0) {
+        close(fd);
+        shm_unlink(name);
+        return -1;
+    }
+    void *map = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED || !map) {
+        shm_unlink(name);
+        return -1;
+    }
+    memset(map, 0, bytes);
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = VB_RESIZE;
+    m.window = w->id;
+    m.a = width;
+    m.b = height;
+    memcpy(m.text, name, sizeof(m.text));
+    struct vb_msg r;
+    int ok = send_msg(&m) == 0 && wait_for(VB_RESIZED, name, &r) == 0;
+    shm_unlink(name);
+    if (!ok) {
+        munmap(map, bytes);
+        return -1;
+    }
+    munmap(w->pixels, w->bytes);
+    w->pixels = map;
+    w->bytes = bytes;
+    w->width = width;
+    w->height = height;
+    snprintf(w->shm, sizeof(w->shm), "%s", name);
+    return 0;
+}
+
+void vb_window_set_state(struct vb_window *w, int state)
+{
+    if (server_version >= 3)
+        simple(VB_SET_STATE, w, state, 0, 0, 0, NULL);
+    else if (state == VB_STATE_MINIMIZED && w)
+        vb_task_minimize(w->id);
+}
+
+void vb_window_start_resize(struct vb_window *w, uint32_t edges)
+{
+    if (server_version >= 3)
+        simple(VB_RESIZE_START, w, (int)edges, 0, 0, 0, NULL);
+}
+
+void vb_window_set_cursor(struct vb_window *w, int cursor)
+{
+    if (server_version >= 3)
+        simple(VB_CURSOR, w, cursor, 0, 0, 0, NULL);
+}
+
 void *vb_window_user(struct vb_window *w)
 {
     return w ? w->user : NULL;
@@ -429,6 +512,9 @@ static bool convert(const struct vb_msg *m, struct vb_event *e)
         e->type = VB_EVENT_CONFIGURE;
         e->x = m->a;
         e->y = m->b;
+        e->width = m->c;
+        e->height = m->d;
+        e->state = (int)m->e;
         if (e->window) {
             e->window->x = m->a;
             e->window->y = m->b;
