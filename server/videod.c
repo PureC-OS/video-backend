@@ -33,6 +33,7 @@ struct client {
     char in[sizeof(struct vb_msg)];
     size_t have;
     bool hello;
+    bool tasks;
 };
 
 struct window {
@@ -41,6 +42,8 @@ struct window {
     int x, y, w, h;
     const uint32_t *pixels;
     size_t bytes;
+    int role;
+    bool minimized;
     char title[VB_TEXT_MAX];
 };
 
@@ -64,6 +67,7 @@ static struct rect dirty;
 static bool cursor_shown;
 static int cursor_x, cursor_y;
 static volatile sig_atomic_t quit;
+static struct rect workarea;
 
 static const char *const cursor_shape[CURSOR_H] = {
     "X           ", "XX          ", "X.X         ", "X..X        ", "X...X       ", "X....X      ",
@@ -104,6 +108,21 @@ static void damage_window_frame(const struct window *w)
     add_dirty(w->x - BORDER, w->y - BORDER, w->w + 2 * BORDER, w->h + 2 * BORDER);
 }
 
+static int layer_of(const struct window *w)
+{
+    switch (w->role) {
+    case VB_ROLE_BACKGROUND: return 0;
+    case VB_ROLE_PANEL: return 2;
+    case VB_ROLE_POPUP: return 3;
+    default: return 1;
+    }
+}
+
+static bool focusable(const struct window *w)
+{
+    return w && !w->minimized && (w->role == VB_ROLE_NORMAL || w->role == VB_ROLE_BACKGROUND);
+}
+
 static uint32_t background(int x, int y)
 {
     (void)x;
@@ -125,8 +144,11 @@ static void compose_rect(const struct rect *r)
     }
     for (int i = 0; i < stack_n; i++) {
         const struct window *w = stack[i];
+        if (w->minimized)
+            continue;
         uint32_t border = w == focused ? COLOR_BORDER_FOCUS : COLOR_BORDER;
-        int fx0 = w->x - BORDER, fy0 = w->y - BORDER, fx1 = w->x + w->w + BORDER, fy1 = w->y + w->h + BORDER;
+        int bw = w->role == VB_ROLE_NORMAL ? BORDER : 0;
+        int fx0 = w->x - bw, fy0 = w->y - bw, fx1 = w->x + w->w + bw, fy1 = w->y + w->h + bw;
         int y0 = fy0 > r->y0 ? fy0 : r->y0, y1 = fy1 < r->y1 ? fy1 : r->y1;
         int x0 = fx0 > r->x0 ? fx0 : r->x0, x1 = fx1 < r->x1 ? fx1 : r->x1;
         for (int y = y0; y < y1; y++) {
@@ -228,6 +250,70 @@ static void send_event(struct window *w, uint32_t type, int a, int b, int cc, in
     send_msg(w->owner, &m);
 }
 
+static void send_task(const struct window *w)
+{
+    if (w->role != VB_ROLE_NORMAL)
+        return;
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = VB_TASK;
+    m.window = w->id;
+    m.a = (int)((w == focused ? VB_TASK_FOCUSED : 0) | (w->minimized ? VB_TASK_MINIMIZED : 0));
+    memcpy(m.text, w->title, sizeof(m.text));
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (clients[i].fd >= 0 && clients[i].tasks)
+            send_msg(&clients[i], &m);
+}
+
+static void send_task_gone(uint32_t id)
+{
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = VB_TASK_GONE;
+    m.window = id;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (clients[i].fd >= 0 && clients[i].tasks)
+            send_msg(&clients[i], &m);
+}
+
+static void send_workarea(struct client *only)
+{
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = VB_WORKAREA;
+    m.a = workarea.x0;
+    m.b = workarea.y0;
+    m.c = workarea.x1 - workarea.x0;
+    m.d = workarea.y1 - workarea.y0;
+    if (only) {
+        send_msg(only, &m);
+        return;
+    }
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (clients[i].fd >= 0 && clients[i].hello)
+            send_msg(&clients[i], &m);
+}
+
+static void update_workarea(void)
+{
+    struct rect r = {0, 0, screen_w, screen_h};
+    for (int i = 0; i < stack_n; i++) {
+        const struct window *w = stack[i];
+        if (w->role != VB_ROLE_PANEL || w->minimized || w->x > 0 || w->x + w->w < screen_w)
+            continue;
+        if (w->y <= 0 && w->y + w->h > r.y0)
+            r.y0 = w->y + w->h;
+        else if (w->y + w->h >= screen_h && w->y < r.y1)
+            r.y1 = w->y;
+    }
+    if (r.y1 <= r.y0)
+        r = (struct rect){0, 0, screen_w, screen_h};
+    if (memcmp(&r, &workarea, sizeof(r)) != 0) {
+        workarea = r;
+        send_workarea(NULL);
+    }
+}
+
 static int stack_index(const struct window *w)
 {
     for (int i = 0; i < stack_n; i++)
@@ -238,37 +324,70 @@ static int stack_index(const struct window *w)
 
 static void set_focus(struct window *w)
 {
-    if (w == focused)
+    if (w == focused || (w && !focusable(w)))
         return;
     struct window *old = focused;
     focused = w;
     if (old) {
         send_event(old, VB_FOCUS, 0, 0, 0, 0, 0);
         damage_window_frame(old);
+        send_task(old);
     }
     if (w) {
         send_event(w, VB_FOCUS, 1, 0, 0, 0, 0);
         damage_window_frame(w);
+        send_task(w);
     }
+}
+
+static struct window *next_focus(const struct window *skip)
+{
+    for (int i = stack_n - 1; i >= 0; i--)
+        if (stack[i] != skip && stack[i]->role == VB_ROLE_NORMAL && !stack[i]->minimized)
+            return stack[i];
+    for (int i = stack_n - 1; i >= 0; i--)
+        if (stack[i] != skip && stack[i]->role == VB_ROLE_BACKGROUND)
+            return stack[i];
+    return NULL;
+}
+
+static void insert_window(struct window *w)
+{
+    int pos = stack_n;
+    while (pos > 0 && layer_of(stack[pos - 1]) > layer_of(w))
+        pos--;
+    memmove(stack + pos + 1, stack + pos, (size_t)(stack_n - pos) * sizeof(stack[0]));
+    stack[pos] = w;
+    stack_n++;
 }
 
 static void raise_window(struct window *w)
 {
     int i = stack_index(w);
-    if (i < 0 || i == stack_n - 1)
+    if (i < 0)
         return;
     memmove(stack + i, stack + i + 1, (size_t)(stack_n - 1 - i) * sizeof(stack[0]));
-    stack[stack_n - 1] = w;
-    damage_window_frame(w);
+    stack_n--;
+    insert_window(w);
+    if (stack_index(w) != i)
+        damage_window_frame(w);
 }
 
 static struct window *window_at(int x, int y)
 {
     for (int i = stack_n - 1; i >= 0; i--) {
         struct window *w = stack[i];
-        if (x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h)
+        if (!w->minimized && x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h)
             return w;
     }
+    return NULL;
+}
+
+static struct window *find_any(uint32_t id)
+{
+    for (int i = 0; i < stack_n; i++)
+        if (stack[i]->id == id)
+            return stack[i];
     return NULL;
 }
 
@@ -296,11 +415,15 @@ static void destroy_window(struct window *w)
         drag = NULL;
     if (focused == w) {
         focused = NULL;
-        if (stack_n)
-            set_focus(stack[stack_n - 1]);
+        set_focus(next_focus(w));
     }
+    if (w->role == VB_ROLE_NORMAL)
+        send_task_gone(w->id);
+    int role = w->role;
     munmap((void *)w->pixels, w->bytes);
     free(w);
+    if (role == VB_ROLE_PANEL)
+        update_workarea();
 }
 
 static void send_error(struct client *c, int code, const char *text)
@@ -357,17 +480,20 @@ static void create_window(struct client *c, const struct vb_msg *m)
     w->h = m->b;
     w->pixels = map;
     w->bytes = bytes;
+    w->role = m->e <= VB_ROLE_POPUP ? (int)m->e : VB_ROLE_NORMAL;
     if (m->c >= 0 && m->d >= 0) {
         w->x = m->c;
         w->y = m->d;
     } else {
-        int span = screen_w - w->w > 0 ? screen_w - w->w : 1;
-        w->x = clampi((screen_w - w->w) / 2 - 120 + cascade * 32 % span, 0, span);
-        w->y = clampi((screen_h - w->h) / 2 - 90 + cascade * 32 % (screen_h - w->h > 0 ? screen_h - w->h : 1), 0,
-                      screen_h > w->h ? screen_h - w->h : 0);
+        int aw = workarea.x1 - workarea.x0, ah = workarea.y1 - workarea.y0;
+        int spanx = aw - w->w > 0 ? aw - w->w : 0, spany = ah - w->h > 0 ? ah - w->h : 0;
+        w->x = workarea.x0 + clampi(spanx / 2 - 120 + cascade * 32, 0, spanx);
+        w->y = workarea.y0 + clampi(spany / 2 - 90 + cascade * 32, 0, spany);
         cascade = (cascade + 1) % 8;
     }
-    stack[stack_n++] = w;
+    if (w->role == VB_ROLE_NORMAL && w->y < workarea.y0)
+        w->y = workarea.y0;
+    insert_window(w);
     damage_window_frame(w);
     struct vb_msg r;
     memset(&r, 0, sizeof(r));
@@ -379,7 +505,14 @@ static void create_window(struct client *c, const struct vb_msg *m)
     r.d = w->h;
     memcpy(r.text, name, sizeof(r.text));
     send_msg(c, &r);
-    set_focus(w);
+    if (w->role == VB_ROLE_PANEL)
+        update_workarea();
+    if (w->role == VB_ROLE_NORMAL) {
+        send_task(w);
+        set_focus(w);
+    } else if (w->role == VB_ROLE_BACKGROUND && !focused) {
+        set_focus(w);
+    }
 }
 
 static void start_drag(struct window *w)
@@ -405,10 +538,12 @@ static void handle_request(struct client *c, const struct vb_msg *m)
         r.a = screen_w;
         r.b = screen_h;
         r.c = VB_PROTO_VERSION;
-        c->hello = m->a == VB_PROTO_VERSION;
+        c->hello = m->a >= VB_PROTO_MIN_VERSION && m->a <= VB_PROTO_VERSION;
         if (!c->hello)
             r.type = VB_ERROR, r.a = VB_ERR_VERSION;
         send_msg(c, &r);
+        if (c->hello)
+            send_workarea(c);
         break;
     }
     case VB_CREATE:
@@ -427,19 +562,58 @@ static void handle_request(struct client *c, const struct vb_msg *m)
             destroy_window(w);
         break;
     case VB_MOVE:
-        if ((w = find_window(c, m->window)) && (mouse_buttons & VB_BUTTON_LEFT))
+        if ((w = find_window(c, m->window)) && w->role == VB_ROLE_NORMAL && (mouse_buttons & VB_BUTTON_LEFT))
             start_drag(w);
         break;
     case VB_TITLE:
         if ((w = find_window(c, m->window))) {
             memcpy(w->title, m->text, sizeof(w->title));
             w->title[sizeof(w->title) - 1] = 0;
+            send_task(w);
         }
         break;
     case VB_RAISE:
         if ((w = find_window(c, m->window))) {
             raise_window(w);
             set_focus(w);
+        }
+        break;
+    case VB_TASKS_SUBSCRIBE:
+        c->tasks = true;
+        for (int i = 0; i < stack_n; i++)
+            if (stack[i]->role == VB_ROLE_NORMAL) {
+                struct vb_msg t;
+                memset(&t, 0, sizeof(t));
+                t.type = VB_TASK;
+                t.window = stack[i]->id;
+                t.a = (int)((stack[i] == focused ? VB_TASK_FOCUSED : 0) |
+                            (stack[i]->minimized ? VB_TASK_MINIMIZED : 0));
+                memcpy(t.text, stack[i]->title, sizeof(t.text));
+                send_msg(c, &t);
+            }
+        break;
+    case VB_ACTIVATE:
+        if ((w = find_any(m->window)) && w->role == VB_ROLE_NORMAL) {
+            w->minimized = false;
+            raise_window(w);
+            damage_window_frame(w);
+            set_focus(w);
+            send_task(w);
+        }
+        break;
+    case VB_MINIMIZE:
+        if ((w = find_any(m->window)) && w->role == VB_ROLE_NORMAL && !w->minimized) {
+            damage_window_frame(w);
+            w->minimized = true;
+            if (hovered == w)
+                hovered = NULL;
+            if (grab == w)
+                grab = NULL;
+            if (drag == w)
+                drag = NULL;
+            if (focused == w)
+                set_focus(next_focus(w));
+            send_task(w);
         }
         break;
     default:
@@ -510,6 +684,8 @@ static void handle_mouse(const struct input_record *r)
         damage_window_frame(drag);
         drag->x = mouse_x - drag_dx;
         drag->y = mouse_y - drag_dy;
+        if (drag->y < workarea.y0)
+            drag->y = workarea.y0;
         damage_window_frame(drag);
         if (!(mouse_buttons & VB_BUTTON_LEFT)) {
             pointer_to(drag, changed, 0);
@@ -519,10 +695,14 @@ static void handle_mouse(const struct input_record *r)
     }
     struct window *under = window_at(mouse_x, mouse_y);
     if (pressed) {
+        for (int i = 0; i < stack_n; i++)
+            if (stack[i]->role == VB_ROLE_POPUP && stack[i] != under)
+                send_event(stack[i], VB_POPUP_DONE, 0, 0, 0, 0, 0);
         if (under) {
-            raise_window(under);
+            if (under->role == VB_ROLE_NORMAL)
+                raise_window(under);
             set_focus(under);
-            if ((mods & VB_MOD_ALT) && (pressed & VB_BUTTON_LEFT)) {
+            if (under->role == VB_ROLE_NORMAL && (mods & VB_MOD_ALT) && (pressed & VB_BUTTON_LEFT)) {
                 start_drag(under);
                 return;
             }
@@ -545,11 +725,16 @@ static void handle_mouse(const struct input_record *r)
 
 static void cycle_focus(void)
 {
-    if (stack_n < 2)
-        return;
-    struct window *bottom = stack[0];
-    raise_window(bottom);
-    set_focus(bottom);
+    for (int i = 0; i < stack_n; i++) {
+        struct window *w = stack[i];
+        if (w->role == VB_ROLE_NORMAL && !w->minimized) {
+            if (w == focused && w == next_focus(NULL))
+                return;
+            raise_window(w);
+            set_focus(w);
+            return;
+        }
+    }
 }
 
 static void handle_key(const struct input_record *r)
@@ -561,7 +746,7 @@ static void handle_key(const struct input_record *r)
         return;
     }
     if (r->pressed && alt && !ctrl && r->scancode == HID_F4) {
-        if (focused)
+        if (focused && focused->role == VB_ROLE_NORMAL)
             send_event(focused, VB_CLOSE, 0, 0, 0, 0, 0);
         return;
     }
@@ -652,6 +837,7 @@ int main(int argc, char **argv)
     syslog(LOG_INFO, "display %dx%d pitch %u, listening on %s", screen_w, screen_h, fb.pitch_bytes, VB_SOCKET_PATH);
     mouse_x = screen_w / 2;
     mouse_y = screen_h / 2;
+    workarea = (struct rect){0, 0, screen_w, screen_h};
     add_dirty(0, 0, screen_w, screen_h);
     flush();
     struct pollfd fds[2 + MAX_CLIENTS];

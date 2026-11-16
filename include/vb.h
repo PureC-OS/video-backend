@@ -13,6 +13,10 @@ enum vb_event_type {
     VB_EVENT_FOCUS,
     VB_EVENT_CLOSE,
     VB_EVENT_DISCONNECT,
+    VB_EVENT_WORKAREA,
+    VB_EVENT_TASK,
+    VB_EVENT_TASK_GONE,
+    VB_EVENT_POPUP_DONE,
 };
 
 struct vb_event {
@@ -27,6 +31,9 @@ struct vb_event {
     bool repeat;
     uint8_t mods;
     bool focused;
+    uint32_t task_id;
+    uint32_t task_flags;
+    char title[VB_TEXT_MAX];
 };
 
 int vb_connect(void);
@@ -36,6 +43,12 @@ void vb_screen_size(int *width, int *height);
 
 struct vb_window *vb_window_create(int width, int height, const char *title);
 struct vb_window *vb_window_create_at(int x, int y, int width, int height, const char *title);
+struct vb_window *vb_window_create_role(int x, int y, int width, int height, const char *title, int role);
+void vb_work_area(int *x, int *y, int *width, int *height);
+void vb_tasks_subscribe(void);
+void vb_task_activate(uint32_t task_id);
+void vb_task_minimize(uint32_t task_id);
+uint32_t vb_window_id(const struct vb_window *window);
 void vb_window_destroy(struct vb_window *window);
 uint32_t *vb_window_pixels(struct vb_window *window);
 int vb_window_width(const struct vb_window *window);

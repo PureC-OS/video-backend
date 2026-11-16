@@ -24,6 +24,7 @@ struct vb_window {
 
 static int sock = -1;
 static int screen_w, screen_h;
+static int work_x, work_y, work_w, work_h;
 static struct vb_window *windows;
 static struct vb_msg queue[QUEUE_MAX];
 static int queue_head, queue_count;
@@ -142,6 +143,10 @@ int vb_connect(void)
     }
     screen_w = r.a;
     screen_h = r.b;
+    work_x = 0;
+    work_y = 0;
+    work_w = r.a;
+    work_h = r.b;
     return 0;
 }
 
@@ -168,7 +173,36 @@ void vb_disconnect(void)
     inhave = 0;
 }
 
+void vb_work_area(int *x, int *y, int *width, int *height)
+{
+    if (x)
+        *x = work_x;
+    if (y)
+        *y = work_y;
+    if (width)
+        *width = work_w;
+    if (height)
+        *height = work_h;
+}
+
+uint32_t vb_window_id(const struct vb_window *w)
+{
+    return w ? w->id : 0;
+}
+
+static struct vb_window *create(int x, int y, int width, int height, const char *title, int role);
+
 struct vb_window *vb_window_create_at(int x, int y, int width, int height, const char *title)
+{
+    return create(x, y, width, height, title, VB_ROLE_NORMAL);
+}
+
+struct vb_window *vb_window_create_role(int x, int y, int width, int height, const char *title, int role)
+{
+    return create(x, y, width, height, title, role);
+}
+
+static struct vb_window *create(int x, int y, int width, int height, const char *title, int role)
 {
     if (sock < 0 && vb_connect() < 0)
         return NULL;
@@ -208,6 +242,7 @@ struct vb_window *vb_window_create_at(int x, int y, int width, int height, const
     m.b = height;
     m.c = x;
     m.d = y;
+    m.e = (uint32_t)role;
     memcpy(m.text, w->shm, sizeof(m.text));
     struct vb_msg r;
     int ok = send_msg(&m) == 0 && wait_for(VB_CREATED, w->shm, &r) == 0;
@@ -245,6 +280,32 @@ static void simple(uint32_t type, const struct vb_window *w, int a, int b, int c
     if (text)
         snprintf(m.text, sizeof(m.text), "%s", text);
     send_msg(&m);
+}
+
+static void global(uint32_t type, uint32_t id)
+{
+    if (sock < 0)
+        return;
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = type;
+    m.window = id;
+    send_msg(&m);
+}
+
+void vb_tasks_subscribe(void)
+{
+    global(VB_TASKS_SUBSCRIBE, 0);
+}
+
+void vb_task_activate(uint32_t id)
+{
+    global(VB_ACTIVATE, id);
+}
+
+void vb_task_minimize(uint32_t id)
+{
+    global(VB_MINIMIZE, id);
 }
 
 void vb_window_destroy(struct vb_window *w)
@@ -350,6 +411,31 @@ static bool convert(const struct vb_msg *m, struct vb_event *e)
     case VB_CLOSE:
         e->type = VB_EVENT_CLOSE;
         break;
+    case VB_POPUP_DONE:
+        e->type = VB_EVENT_POPUP_DONE;
+        break;
+    case VB_WORKAREA:
+        work_x = m->a;
+        work_y = m->b;
+        work_w = m->c;
+        work_h = m->d;
+        e->type = VB_EVENT_WORKAREA;
+        e->x = m->a;
+        e->y = m->b;
+        return true;
+    case VB_TASK:
+        e->type = VB_EVENT_TASK;
+        e->task_id = m->window;
+        e->task_flags = (uint32_t)m->a;
+        memcpy(e->title, m->text, sizeof(e->title));
+        e->title[sizeof(e->title) - 1] = 0;
+        e->window = NULL;
+        return true;
+    case VB_TASK_GONE:
+        e->type = VB_EVENT_TASK_GONE;
+        e->task_id = m->window;
+        e->window = NULL;
+        return true;
     default:
         return false;
     }
