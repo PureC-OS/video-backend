@@ -383,6 +383,18 @@ int vb_server_version(void)
     return server_version;
 }
 
+void vb_set_mode(int width, int height)
+{
+    if (sock < 0 || server_version < 3)
+        return;
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = VB_SET_MODE;
+    m.a = width;
+    m.b = height;
+    send_msg(&m);
+}
+
 int vb_window_resize(struct vb_window *w, int width, int height)
 {
     if (!w || sock < 0 || server_version < 3 || width <= 0 || height <= 0 || width > VB_MAX_SIZE ||
@@ -520,6 +532,20 @@ static bool convert(const struct vb_msg *m, struct vb_event *e)
             e->window->y = m->b;
         }
         break;
+    case VB_SCREEN:
+        screen_w = m->a;
+        screen_h = m->b;
+        e->type = VB_EVENT_SCREEN;
+        e->width = m->a;
+        e->height = m->b;
+        e->window = NULL;
+        return true;
+    case VB_ERROR:
+        if (strncmp(m->text, "mode", sizeof(m->text)) != 0)
+            return false;
+        e->type = VB_EVENT_SCREEN;
+        e->window = NULL;
+        return true;
     case VB_WORKAREA:
         work_x = m->a;
         work_y = m->b;

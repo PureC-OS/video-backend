@@ -18,6 +18,7 @@ enum vb_event_type {
     VB_EVENT_TASK_GONE,
     VB_EVENT_POPUP_DONE,
     VB_EVENT_CONFIGURE,
+    VB_EVENT_SCREEN,
 };
 
 struct vb_event {
@@ -63,6 +64,7 @@ void vb_window_title(struct vb_window *window, const char *title);
 void vb_window_move(struct vb_window *window);
 void vb_window_raise(struct vb_window *window);
 int vb_server_version(void);
+void vb_set_mode(int width, int height);
 int vb_window_resize(struct vb_window *window, int width, int height);
 void vb_window_set_state(struct vb_window *window, int state);
 void vb_window_start_resize(struct vb_window *window, uint32_t edges);

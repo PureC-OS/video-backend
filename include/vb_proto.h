@@ -22,6 +22,7 @@ enum vb_request {
     VB_SET_STATE,
     VB_RESIZE_START,
     VB_CURSOR,
+    VB_SET_MODE,
 };
 
 enum vb_state {
@@ -72,6 +73,7 @@ enum vb_reply {
     VB_POPUP_DONE,
     VB_CONFIGURE,
     VB_RESIZED,
+    VB_SCREEN,
 };
 
 enum vb_error {
@@ -124,6 +126,7 @@ struct vb_msg {
  *   SET_STATE window, a=vb_state: maximize, restore, fullscreen or minimize (version 3)
  *   RESIZE_START window, a=VB_EDGE_* bits: resize with the pointer while the left button is held (version 3)
  *   CURSOR   window, a=vb_cursor: pointer shape over this window (version 3)
+ *   SET_MODE a=width b=height: change the display mode and remember it (version 3)
  *
  * Replies and events (videod -> client)
  *   WELCOME  a=screen width b=screen height c=version
@@ -141,4 +144,6 @@ struct vb_msg {
  *   CONFIGURE window, a=x b=y: the window was moved (sent when a move ends);
  *            version 3 also c=width d=height (0 = keep) e=vb_state: the size the window should take
  *   RESIZED  window, a=width b=height text=shared memory name: the new buffer of RESIZE is in use
+ *   SCREEN   a=width b=height: the display mode changed (to every client); ERROR a=VB_ERR_SIZE text="mode"
+ *            answers a SET_MODE that failed
  */

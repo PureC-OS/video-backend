@@ -262,6 +262,7 @@ static bool focusable(const struct window *w)
 
 #define COLOR_BACKGROUND 0x11111Bu
 #define HOLD_MS 1500u
+#define DISPLAY_CONFIG "/config/display.ini"
 
 static uint64_t hold_until;
 
@@ -868,6 +869,90 @@ static void attach_buffer(struct client *c, struct window *w, const struct vb_ms
     send_msg(c, &r);
 }
 
+static int apply_mode(int width, int height)
+{
+    if (width == screen_w && height == screen_h)
+        return 0;
+    int32_t rc = pc_display_set_mode((uint32_t)width, (uint32_t)height, 32);
+    if (rc < 0)
+        return rc;
+    struct fb_map_info next;
+    rc = pc_fb_map(&next);
+    if (rc < 0 || next.bpp != 32 || !next.width || !next.height)
+        return rc < 0 ? rc : -1;
+    uint32_t *next_back = malloc((size_t)next.width * (size_t)next.height * 4);
+    if (!next_back)
+        return -1;
+    free(back);
+    back = next_back;
+    fb = next;
+    screen_w = (int)fb.width;
+    screen_h = (int)fb.height;
+    mouse_x = clampi(mouse_x, 0, screen_w - 1);
+    mouse_y = clampi(mouse_y, 0, screen_h - 1);
+    cursor_shown = false;
+    dirty.x0 = dirty.x1 = 0;
+    resize_w = NULL;
+    drag = NULL;
+    workarea = (struct rect){0, 0, 0, 0};
+    update_workarea();
+    for (int i = 0; i < stack_n; i++) {
+        struct window *w = stack[i];
+        if (w->role != VB_ROLE_NORMAL)
+            continue;
+        if (w->state != VB_STATE_NORMAL) {
+            apply_state_geometry(w);
+        } else {
+            int nx = clampi(w->x, 0, screen_w > w->w ? screen_w - w->w : 0);
+            int ny = clampi(w->y, workarea.y0, screen_h > w->h ? screen_h - w->h : workarea.y0);
+            if (nx != w->x || ny != w->y) {
+                w->x = nx;
+                w->y = ny;
+                send_event(w, VB_CONFIGURE, w->x, w->y, 0, 0, (uint32_t)w->state);
+            }
+        }
+    }
+    struct vb_msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = VB_SCREEN;
+    m.a = screen_w;
+    m.b = screen_h;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (clients[i].fd >= 0 && clients[i].hello)
+            send_msg(&clients[i], &m);
+    add_dirty(0, 0, screen_w, screen_h);
+    syslog(LOG_INFO, "display mode %dx%d", screen_w, screen_h);
+    return 0;
+}
+
+static void save_mode(void)
+{
+    mkdir("/config", 0755);
+    FILE *f = fopen(DISPLAY_CONFIG, "w");
+    if (!f)
+        return;
+    fprintf(f, "width=%d\nheight=%d\nbpp=32\nscale=100\n", screen_w, screen_h);
+    fclose(f);
+}
+
+static void load_mode(void)
+{
+    FILE *f = fopen(DISPLAY_CONFIG, "r");
+    if (!f)
+        return;
+    char line[64];
+    int width = 0, height = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, "width=", 6))
+            width = atoi(line + 6);
+        else if (!strncmp(line, "height=", 7))
+            height = atoi(line + 7);
+    }
+    fclose(f);
+    if (width >= 640 && height >= 400 && apply_mode(width, height) < 0)
+        syslog(LOG_WARNING, "cannot restore the display mode %dx%d", width, height);
+}
+
 static void start_drag(struct window *w)
 {
     drag = w;
@@ -936,6 +1021,12 @@ static void handle_request(struct client *c, const struct vb_msg *m)
         if ((w = find_window(c, m->window)) && w->role == VB_ROLE_NORMAL && w->state == VB_STATE_NORMAL &&
             (mouse_buttons & VB_BUTTON_LEFT) && (m->a & 15))
             start_resize(w, (uint32_t)m->a & 15u);
+        break;
+    case VB_SET_MODE:
+        if (apply_mode(m->a, m->b) < 0)
+            send_error(c, VB_ERR_SIZE, "mode");
+        else
+            save_mode();
         break;
     case VB_CURSOR:
         if ((w = find_window(c, m->window)))
@@ -1243,6 +1334,7 @@ int main(int argc, char **argv)
     mouse_x = screen_w / 2;
     mouse_y = screen_h / 2;
     workarea = (struct rect){0, 0, screen_w, screen_h};
+    load_mode();
     add_dirty(0, 0, screen_w, screen_h);
     hold_frame();
     flush();
