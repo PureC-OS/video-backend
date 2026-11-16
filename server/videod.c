@@ -511,8 +511,10 @@ static void handle_mouse(const struct input_record *r)
         drag->x = mouse_x - drag_dx;
         drag->y = mouse_y - drag_dy;
         damage_window_frame(drag);
-        if (!(mouse_buttons & VB_BUTTON_LEFT))
+        if (!(mouse_buttons & VB_BUTTON_LEFT)) {
+            pointer_to(drag, changed, 0);
             drag = NULL;
+        }
         return;
     }
     struct window *under = window_at(mouse_x, mouse_y);
