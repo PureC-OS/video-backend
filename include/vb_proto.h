@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 #define VB_SOCKET_PATH "/run/videod.sock"
-#define VB_PROTO_VERSION 2
+#define VB_PROTO_VERSION 3
 #define VB_PROTO_MIN_VERSION 1
 #define VB_TEXT_MAX 64
 #define VB_MAX_SIZE 4096
@@ -18,6 +18,32 @@ enum vb_request {
     VB_TASKS_SUBSCRIBE,
     VB_ACTIVATE,
     VB_MINIMIZE,
+    VB_RESIZE,
+    VB_SET_STATE,
+    VB_RESIZE_START,
+    VB_CURSOR,
+};
+
+enum vb_state {
+    VB_STATE_NORMAL = 0,
+    VB_STATE_MAXIMIZED = 1,
+    VB_STATE_FULLSCREEN = 2,
+    VB_STATE_MINIMIZED = 3,
+};
+
+#define VB_EDGE_LEFT 1u
+#define VB_EDGE_RIGHT 2u
+#define VB_EDGE_TOP 4u
+#define VB_EDGE_BOTTOM 8u
+
+enum vb_cursor {
+    VB_CURSOR_ARROW = 0,
+    VB_CURSOR_RESIZE_H,
+    VB_CURSOR_RESIZE_V,
+    VB_CURSOR_RESIZE_NWSE,
+    VB_CURSOR_RESIZE_NESW,
+    VB_CURSOR_MOVE,
+    VB_CURSOR_COUNT,
 };
 
 enum vb_role {
@@ -45,6 +71,7 @@ enum vb_reply {
     VB_TASK_GONE,
     VB_POPUP_DONE,
     VB_CONFIGURE,
+    VB_RESIZED,
 };
 
 enum vb_error {
@@ -93,6 +120,10 @@ struct vb_msg {
  *   TASKS_SUBSCRIBE  receive TASK / TASK_GONE for every normal window (also the current ones)
  *   ACTIVATE window=any task id: show, raise and focus it
  *   MINIMIZE window=any task id: hide it
+ *   RESIZE   window, a=width b=height text=shared memory name: replace the buffer (version 3)
+ *   SET_STATE window, a=vb_state: maximize, restore, fullscreen or minimize (version 3)
+ *   RESIZE_START window, a=VB_EDGE_* bits: resize with the pointer while the left button is held (version 3)
+ *   CURSOR   window, a=vb_cursor: pointer shape over this window (version 3)
  *
  * Replies and events (videod -> client)
  *   WELCOME  a=screen width b=screen height c=version
@@ -107,5 +138,7 @@ struct vb_msg {
  *   TASK     window=task id, a=VB_TASK_* flags, text=title (new or changed)
  *   TASK_GONE window=task id
  *   POPUP_DONE window: a click landed outside this popup
- *   CONFIGURE window, a=x b=y: the window was moved (sent when a move ends)
+ *   CONFIGURE window, a=x b=y: the window was moved (sent when a move ends);
+ *            version 3 also c=width d=height (0 = keep) e=vb_state: the size the window should take
+ *   RESIZED  window, a=width b=height text=shared memory name: the new buffer of RESIZE is in use
  */

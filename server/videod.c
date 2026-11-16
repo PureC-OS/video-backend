@@ -28,6 +28,12 @@
 
 #define COLOR_BORDER 0x3A3F4Bu
 #define COLOR_BORDER_FOCUS 0x5B8DEFu
+#define COLOR_PAD 0x1E1E2Eu
+#define MIN_W 160
+#define MIN_H 100
+#define CONFIGURE_MS 33
+#define HID_DOWN 0x51
+#define HID_UP 0x52
 
 struct client {
     int fd;
@@ -35,6 +41,7 @@ struct client {
     size_t have;
     bool hello;
     bool tasks;
+    int version;
 };
 
 struct window {
@@ -46,6 +53,12 @@ struct window {
     int role;
     bool minimized;
     char title[VB_TEXT_MAX];
+    int bw, bh;
+    int state;
+    int rx, ry, rw, rh;
+    int cursor;
+    bool pending;
+    int pend_x, pend_y, pend_w, pend_h;
 };
 
 struct rect {
@@ -59,14 +72,17 @@ static struct client clients[MAX_CLIENTS];
 static struct window *stack[MAX_WINDOWS];
 static int stack_n;
 static uint32_t next_id = 1;
-static struct window *focused, *hovered, *grab, *drag;
+static struct window *focused, *hovered, *grab, *drag, *resize_w;
 static int drag_dx, drag_dy;
+static uint32_t resize_edges;
+static int resize_x, resize_y, resize_ww, resize_hh, resize_mx, resize_my;
+static uint64_t resize_sent;
 static int mouse_x, mouse_y;
 static uint32_t mouse_buttons;
 static uint8_t mods;
 static struct rect dirty;
 static bool cursor_shown;
-static int cursor_x, cursor_y;
+static int cursor_kind;
 static volatile sig_atomic_t quit;
 static struct rect workarea;
 
@@ -76,6 +92,124 @@ static const char *const cursor_shape[CURSOR_H] = {
     "X......XXXXX", "X...X..X    ", "X..XX..X    ", "X.X  X..X   ", "XX   X..X   ", "X     X..X  ",
     "      XXX   ",
 };
+
+static const char *const cursor_h[11] = {
+    "                     ",
+    "    XXX       XXX    ",
+    "   XX.X       X.XX   ",
+    "  XX..X       X..XX  ",
+    " XX...XXXXXXXXX...XX ",
+    " X.................X ",
+    " XX...XXXXXXXXX...XX ",
+    "  XX..X       X..XX  ",
+    "   XX.X       X.XX   ",
+    "    XXX       XXX    ",
+    "                     ",
+};
+
+static const char *const cursor_v[21] = {
+    "           ",
+    "    XXX    ",
+    "   XX.XX   ",
+    "  XX...XX  ",
+    " XX.....XX ",
+    " X.......X ",
+    " XXXX.XXXX ",
+    "    X.X    ",
+    "    X.X    ",
+    "    X.X    ",
+    "    X.X    ",
+    "    X.X    ",
+    "    X.X    ",
+    "    X.X    ",
+    " XXXX.XXXX ",
+    " X.......X ",
+    " XX.....XX ",
+    "  XX...XX  ",
+    "   XX.XX   ",
+    "    XXX    ",
+    "           ",
+};
+
+static const char *const cursor_nwse[17] = {
+    "                 ",
+    " XXXXXXX         ",
+    " X.....X         ",
+    " X....XX         ",
+    " X...XX          ",
+    " X..X.XX         ",
+    " X.XXX.XX        ",
+    " XXX XX.XX       ",
+    "      XX.XX      ",
+    "       XX.XX XXX ",
+    "        XX.XXX.X ",
+    "         XX.X..X ",
+    "          XX...X ",
+    "         XX....X ",
+    "         X.....X ",
+    "         XXXXXXX ",
+    "                 ",
+};
+
+static const char *const cursor_nesw[17] = {
+    "                 ",
+    "         XXXXXXX ",
+    "         X.....X ",
+    "         XX....X ",
+    "          XX...X ",
+    "         XX.X..X ",
+    "        XX.XXX.X ",
+    "       XX.XX XXX ",
+    "      XX.XX      ",
+    " XXX XX.XX       ",
+    " X.XXX.XX        ",
+    " X..X.XX         ",
+    " X...XX          ",
+    " X....XX         ",
+    " X.....X         ",
+    " XXXXXXX         ",
+    "                 ",
+};
+
+static const char *const cursor_move[21] = {
+    "                     ",
+    "    XXX              ",
+    "   XX.XX             ",
+    "  XX...XX            ",
+    " XX.....XX           ",
+    " X.......X           ",
+    " XXXX.XXXX    XXX    ",
+    "   XX.X       X.XX   ",
+    "  XX..X       X..XX  ",
+    " XX...XXXXXXXXX...XX ",
+    " X.................X ",
+    " XX...XXXXXXXXX...XX ",
+    "  XX..X       X..XX  ",
+    "   XX.X       X.XX   ",
+    " XXXX.XXXX    XXX    ",
+    " X.......X           ",
+    " XX.....XX           ",
+    "  XX...XX            ",
+    "   XX.XX             ",
+    "    XXX              ",
+    "                     ",
+};
+
+struct cursor_def {
+    int w, h, hx, hy;
+    const char *const *rows;
+};
+
+static const struct cursor_def cursors[VB_CURSOR_COUNT] = {
+    [VB_CURSOR_ARROW] = {CURSOR_W, CURSOR_H, 0, 0, cursor_shape},
+    [VB_CURSOR_RESIZE_H] = {21, 11, 10, 5, cursor_h},
+    [VB_CURSOR_RESIZE_V] = {11, 21, 5, 10, cursor_v},
+    [VB_CURSOR_RESIZE_NWSE] = {17, 17, 8, 8, cursor_nwse},
+    [VB_CURSOR_RESIZE_NESW] = {17, 17, 8, 8, cursor_nesw},
+    [VB_CURSOR_MOVE] = {21, 21, 10, 10, cursor_move},
+};
+
+static struct rect cursor_box;
 
 static void on_signal(int sig)
 {
@@ -111,6 +245,8 @@ static void damage_window_frame(const struct window *w)
 
 static int layer_of(const struct window *w)
 {
+    if (w->role == VB_ROLE_NORMAL && w->state == VB_STATE_FULLSCREEN)
+        return 2;
     switch (w->role) {
     case VB_ROLE_BACKGROUND: return 0;
     case VB_ROLE_PANEL: return 2;
@@ -171,6 +307,13 @@ static uint32_t *fb_row(int y)
     return (uint32_t *)(uintptr_t)(fb.address + (uint64_t)y * fb.pitch_bytes);
 }
 
+static int border_of(const struct window *w)
+{
+    if (w->role != VB_ROLE_NORMAL || !w->owner || w->owner->version >= 3)
+        return 0;
+    return BORDER;
+}
+
 static void compose_rect(const struct rect *r)
 {
     for (int y = r->y0; y < r->y1; y++) {
@@ -183,7 +326,7 @@ static void compose_rect(const struct rect *r)
         if (w->minimized)
             continue;
         uint32_t border = w == focused ? COLOR_BORDER_FOCUS : COLOR_BORDER;
-        int bw = w->role == VB_ROLE_NORMAL ? BORDER : 0;
+        int bw = border_of(w);
         int fx0 = w->x - bw, fy0 = w->y - bw, fx1 = w->x + w->w + bw, fy1 = w->y + w->h + bw;
         int y0 = fy0 > r->y0 ? fy0 : r->y0, y1 = fy1 < r->y1 ? fy1 : r->y1;
         int x0 = fx0 > r->x0 ? fx0 : r->x0, x1 = fx1 < r->x1 ? fx1 : r->x1;
@@ -197,8 +340,12 @@ static void compose_rect(const struct rect *r)
                     continue;
                 }
                 int ix0 = x, ix1 = x1 < w->x + w->w ? x1 : w->x + w->w;
-                memcpy(line + ix0, w->pixels + (size_t)(y - w->y) * (size_t)w->w + (size_t)(ix0 - w->x),
-                       (size_t)(ix1 - ix0) * 4);
+                int cy = y - w->y, cx0 = ix0 - w->x, cx1 = ix1 - w->x;
+                int end = cy < w->bh ? (cx1 < w->bw ? cx1 : w->bw) : cx0;
+                if (end > cx0)
+                    memcpy(line + ix0, w->pixels + (size_t)cy * (size_t)w->bw + (size_t)cx0, (size_t)(end - cx0) * 4);
+                for (int px = end > cx0 ? end : cx0; px < cx1; px++)
+                    line[w->x + px] = COLOR_PAD;
                 x = ix1 - 1;
             }
         }
@@ -211,16 +358,32 @@ static void copy_to_fb(const struct rect *r)
         memcpy(fb_row(y) + r->x0, back + (size_t)y * (size_t)screen_w + r->x0, (size_t)(r->x1 - r->x0) * 4);
 }
 
+static int wanted_cursor(void)
+{
+    if (resize_w) {
+        bool h = resize_edges & (VB_EDGE_LEFT | VB_EDGE_RIGHT), v = resize_edges & (VB_EDGE_TOP | VB_EDGE_BOTTOM);
+        if (h && v)
+            return ((resize_edges & VB_EDGE_LEFT) != 0) == ((resize_edges & VB_EDGE_TOP) != 0) ? VB_CURSOR_RESIZE_NWSE
+                                                                                            : VB_CURSOR_RESIZE_NESW;
+        return h ? VB_CURSOR_RESIZE_H : VB_CURSOR_RESIZE_V;
+    }
+    if (drag)
+        return VB_CURSOR_MOVE;
+    const struct window *w = grab ? grab : hovered;
+    return w ? w->cursor : VB_CURSOR_ARROW;
+}
+
 static void draw_cursor(void)
 {
-    for (int cy = 0; cy < CURSOR_H; cy++) {
-        int y = cursor_y + cy;
+    const struct cursor_def *d = &cursors[cursor_kind];
+    for (int cy = 0; cy < d->h; cy++) {
+        int y = cursor_box.y0 + cy;
         if (y < 0 || y >= screen_h)
             continue;
         uint32_t *line = fb_row(y);
-        for (int cx = 0; cx < CURSOR_W; cx++) {
-            int x = cursor_x + cx;
-            char c = cursor_shape[cy][cx];
+        for (int cx = 0; cx < d->w; cx++) {
+            int x = cursor_box.x0 + cx;
+            char c = d->rows[cy][cx];
             if (x < 0 || x >= screen_w || c == ' ')
                 continue;
             line[x] = c == 'X' ? 0x000000u : 0xFFFFFFu;
@@ -228,41 +391,46 @@ static void draw_cursor(void)
     }
 }
 
+static void damage_box(const struct rect *b)
+{
+    struct rect r = {clampi(b->x0, 0, screen_w), clampi(b->y0, 0, screen_h), clampi(b->x1, 0, screen_w),
+                     clampi(b->y1, 0, screen_h)};
+    if (r.x0 < r.x1 && r.y0 < r.y1) {
+        copy_to_fb(&r);
+        pc_fb_damage((uint32_t)r.x0, (uint32_t)r.y0, (uint32_t)(r.x1 - r.x0), (uint32_t)(r.y1 - r.y0));
+    }
+}
+
 static void flush(void)
 {
     if (holding())
         return;
-    bool moved = !cursor_shown || cursor_x != mouse_x || cursor_y != mouse_y;
-    struct rect old_cursor = {cursor_x, cursor_y, cursor_x + CURSOR_W, cursor_y + CURSOR_H};
-    if (dirty.x0 < dirty.x1) {
+    int kind = wanted_cursor();
+    const struct cursor_def *d = &cursors[kind];
+    struct rect box = {mouse_x - d->hx, mouse_y - d->hy, mouse_x - d->hx + d->w, mouse_y - d->hy + d->h};
+    bool moved = !cursor_shown || kind != cursor_kind || memcmp(&box, &cursor_box, sizeof(box)) != 0;
+    struct rect old = cursor_box;
+    bool had_dirty = dirty.x0 < dirty.x1;
+    if (had_dirty) {
         compose_rect(&dirty);
         copy_to_fb(&dirty);
         pc_fb_damage((uint32_t)dirty.x0, (uint32_t)dirty.y0, (uint32_t)(dirty.x1 - dirty.x0),
                      (uint32_t)(dirty.y1 - dirty.y0));
     }
-    bool overlap = dirty.x0 < dirty.x1 && old_cursor.x0 < dirty.x1 && old_cursor.x1 > dirty.x0 &&
-                   old_cursor.y0 < dirty.y1 && old_cursor.y1 > dirty.y0;
-    if (!moved && !overlap) {
-        dirty.x0 = dirty.x1 = 0;
+    bool overlap = had_dirty && old.x0 < dirty.x1 && old.x1 > dirty.x0 && old.y0 < dirty.y1 && old.y1 > dirty.y0;
+    dirty.x0 = dirty.x1 = 0;
+    if (!moved && !overlap)
         return;
-    }
-    if (cursor_shown && moved) {
-        struct rect r = {clampi(old_cursor.x0, 0, screen_w), clampi(old_cursor.y0, 0, screen_h),
-                         clampi(old_cursor.x1, 0, screen_w), clampi(old_cursor.y1, 0, screen_h)};
-        if (r.x0 < r.x1 && r.y0 < r.y1) {
-            copy_to_fb(&r);
-            pc_fb_damage((uint32_t)r.x0, (uint32_t)r.y0, (uint32_t)(r.x1 - r.x0), (uint32_t)(r.y1 - r.y0));
-        }
-    }
-    cursor_x = mouse_x;
-    cursor_y = mouse_y;
+    if (cursor_shown && moved)
+        damage_box(&old);
+    cursor_box = box;
+    cursor_kind = kind;
     cursor_shown = true;
     draw_cursor();
-    int cx0 = clampi(cursor_x, 0, screen_w), cy0 = clampi(cursor_y, 0, screen_h);
-    int cx1 = clampi(cursor_x + CURSOR_W, 0, screen_w), cy1 = clampi(cursor_y + CURSOR_H, 0, screen_h);
-    if (cx0 < cx1 && cy0 < cy1)
-        pc_fb_damage((uint32_t)cx0, (uint32_t)cy0, (uint32_t)(cx1 - cx0), (uint32_t)(cy1 - cy0));
-    dirty.x0 = dirty.x1 = 0;
+    struct rect r = {clampi(box.x0, 0, screen_w), clampi(box.y0, 0, screen_h), clampi(box.x1, 0, screen_w),
+                     clampi(box.y1, 0, screen_h)};
+    if (r.x0 < r.x1 && r.y0 < r.y1)
+        pc_fb_damage((uint32_t)r.x0, (uint32_t)r.y0, (uint32_t)(r.x1 - r.x0), (uint32_t)(r.y1 - r.y0));
 }
 
 static void send_msg(struct client *c, const struct vb_msg *m)
@@ -332,6 +500,8 @@ static void send_workarea(struct client *only)
             send_msg(&clients[i], &m);
 }
 
+static void apply_state_geometry(struct window *w);
+
 static void update_workarea(void)
 {
     struct rect r = {0, 0, screen_w, screen_h};
@@ -349,6 +519,9 @@ static void update_workarea(void)
     if (memcmp(&r, &workarea, sizeof(r)) != 0) {
         workarea = r;
         send_workarea(NULL);
+        for (int i = 0; i < stack_n; i++)
+            if (stack[i]->role == VB_ROLE_NORMAL && stack[i]->state == VB_STATE_MAXIMIZED)
+                apply_state_geometry(stack[i]);
     }
 }
 
@@ -451,6 +624,8 @@ static void destroy_window(struct window *w)
         grab = NULL;
     if (drag == w)
         drag = NULL;
+    if (resize_w == w)
+        resize_w = NULL;
     if (focused == w) {
         focused = NULL;
         set_focus(next_focus(w));
@@ -476,6 +651,25 @@ static void send_error(struct client *c, int code, const char *text)
     send_msg(c, &m);
 }
 
+static void *map_shm(const char *name, int width, int height, size_t *bytes_out)
+{
+    size_t bytes = (size_t)width * (size_t)height * 4;
+    int fd = shm_open(name, O_RDWR, 0);
+    if (fd < 0)
+        return NULL;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && st.st_size > 0 && (size_t)st.st_size < bytes) {
+        close(fd);
+        return NULL;
+    }
+    void *map = mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED || !map)
+        return NULL;
+    *bytes_out = bytes;
+    return map;
+}
+
 static void create_window(struct client *c, const struct vb_msg *m)
 {
     char name[VB_TEXT_MAX];
@@ -489,21 +683,9 @@ static void create_window(struct client *c, const struct vb_msg *m)
         send_error(c, VB_ERR_LIMIT, name);
         return;
     }
-    size_t bytes = (size_t)m->a * (size_t)m->b * 4;
-    int fd = shm_open(name, O_RDWR, 0);
-    if (fd < 0) {
-        send_error(c, VB_ERR_SHM, name);
-        return;
-    }
-    struct stat st;
-    if (fstat(fd, &st) == 0 && st.st_size > 0 && (size_t)st.st_size < bytes) {
-        close(fd);
-        send_error(c, VB_ERR_SHM, name);
-        return;
-    }
-    void *map = mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED || !map) {
+    size_t bytes = 0;
+    void *map = map_shm(name, m->a, m->b, &bytes);
+    if (!map) {
         send_error(c, VB_ERR_SHM, name);
         return;
     }
@@ -518,6 +700,8 @@ static void create_window(struct client *c, const struct vb_msg *m)
     w->owner = c;
     w->w = m->a;
     w->h = m->b;
+    w->bw = m->a;
+    w->bh = m->b;
     w->pixels = map;
     w->bytes = bytes;
     w->role = m->e <= VB_ROLE_POPUP ? (int)m->e : VB_ROLE_NORMAL;
@@ -555,6 +739,135 @@ static void create_window(struct client *c, const struct vb_msg *m)
     }
 }
 
+static void send_configure(struct window *w, int x, int y, int width, int height)
+{
+    w->pending = true;
+    w->pend_x = x;
+    w->pend_y = y;
+    w->pend_w = width;
+    w->pend_h = height;
+    if (w->owner && w->owner->version >= 3)
+        send_event(w, VB_CONFIGURE, x, y, width, height, (uint32_t)w->state);
+    else
+        send_event(w, VB_CONFIGURE, x, y, 0, 0, 0);
+}
+
+static void minimize_window(struct window *w)
+{
+    if (w->role != VB_ROLE_NORMAL || w->minimized)
+        return;
+    damage_window_frame(w);
+    w->minimized = true;
+    if (hovered == w)
+        hovered = NULL;
+    if (grab == w)
+        grab = NULL;
+    if (drag == w)
+        drag = NULL;
+    if (resize_w == w)
+        resize_w = NULL;
+    if (focused == w)
+        set_focus(next_focus(w));
+    send_task(w);
+}
+
+static void apply_state_geometry(struct window *w)
+{
+    if (w->state == VB_STATE_MAXIMIZED)
+        send_configure(w, workarea.x0, workarea.y0, workarea.x1 - workarea.x0, workarea.y1 - workarea.y0);
+    else if (w->state == VB_STATE_FULLSCREEN)
+        send_configure(w, 0, 0, screen_w, screen_h);
+    else
+        send_configure(w, w->rx, w->ry, w->rw, w->rh);
+}
+
+static void set_state(struct window *w, int state)
+{
+    if (w->role != VB_ROLE_NORMAL)
+        return;
+    if (state == VB_STATE_MINIMIZED) {
+        minimize_window(w);
+        return;
+    }
+    if (state < VB_STATE_NORMAL || state > VB_STATE_FULLSCREEN || state == w->state)
+        return;
+    if (w->state == VB_STATE_NORMAL) {
+        w->rx = w->x;
+        w->ry = w->y;
+        w->rw = w->w;
+        w->rh = w->h;
+    }
+    if (resize_w == w)
+        resize_w = NULL;
+    if (drag == w)
+        drag = NULL;
+    int old = w->state;
+    w->state = state;
+    if (state == VB_STATE_FULLSCREEN || old == VB_STATE_FULLSCREEN)
+        raise_window(w);
+    damage_window_frame(w);
+    apply_state_geometry(w);
+}
+
+static void start_resize(struct window *w, uint32_t edges)
+{
+    resize_w = w;
+    resize_edges = edges;
+    resize_x = w->x;
+    resize_y = w->y;
+    resize_ww = w->w;
+    resize_hh = w->h;
+    resize_mx = mouse_x;
+    resize_my = mouse_y;
+    resize_sent = 0;
+    drag = NULL;
+    grab = NULL;
+}
+
+static void attach_buffer(struct client *c, struct window *w, const struct vb_msg *m)
+{
+    char name[VB_TEXT_MAX];
+    memcpy(name, m->text, sizeof(name));
+    name[sizeof(name) - 1] = 0;
+    if (m->a <= 0 || m->b <= 0 || m->a > VB_MAX_SIZE || m->b > VB_MAX_SIZE) {
+        send_error(c, VB_ERR_SIZE, name);
+        return;
+    }
+    size_t bytes = 0;
+    void *map = map_shm(name, m->a, m->b, &bytes);
+    if (!map) {
+        send_error(c, VB_ERR_SHM, name);
+        return;
+    }
+    damage_window_frame(w);
+    munmap((void *)w->pixels, w->bytes);
+    w->pixels = map;
+    w->bytes = bytes;
+    w->bw = m->a;
+    w->bh = m->b;
+    if (resize_w == w) {
+        if (resize_edges & VB_EDGE_LEFT)
+            w->x = resize_x + resize_ww - m->a;
+        if (resize_edges & VB_EDGE_TOP)
+            w->y = resize_y + resize_hh - m->b;
+    } else if (w->pending && (w->state != VB_STATE_NORMAL || (w->pend_w == m->a && w->pend_h == m->b))) {
+        w->x = w->pend_x;
+        w->y = w->pend_y;
+        w->pending = false;
+    }
+    w->w = m->a;
+    w->h = m->b;
+    damage_window_frame(w);
+    struct vb_msg r;
+    memset(&r, 0, sizeof(r));
+    r.type = VB_RESIZED;
+    r.window = w->id;
+    r.a = m->a;
+    r.b = m->b;
+    memcpy(r.text, name, sizeof(r.text));
+    send_msg(c, &r);
+}
+
 static void start_drag(struct window *w)
 {
     drag = w;
@@ -579,6 +892,7 @@ static void handle_request(struct client *c, const struct vb_msg *m)
         r.b = screen_h;
         r.c = VB_PROTO_VERSION;
         c->hello = m->a >= VB_PROTO_MIN_VERSION && m->a <= VB_PROTO_VERSION;
+        c->version = c->hello ? m->a : 0;
         if (!c->hello)
             r.type = VB_ERROR, r.a = VB_ERR_VERSION;
         send_msg(c, &r);
@@ -604,8 +918,28 @@ static void handle_request(struct client *c, const struct vb_msg *m)
             destroy_window(w);
         break;
     case VB_MOVE:
-        if ((w = find_window(c, m->window)) && w->role == VB_ROLE_NORMAL && (mouse_buttons & VB_BUTTON_LEFT))
+        if ((w = find_window(c, m->window)) && w->role == VB_ROLE_NORMAL && w->state == VB_STATE_NORMAL &&
+            (mouse_buttons & VB_BUTTON_LEFT)) {
+            w->pending = false;
             start_drag(w);
+        }
+        break;
+    case VB_RESIZE:
+        if ((w = find_window(c, m->window)))
+            attach_buffer(c, w, m);
+        break;
+    case VB_SET_STATE:
+        if ((w = find_window(c, m->window)))
+            set_state(w, m->a);
+        break;
+    case VB_RESIZE_START:
+        if ((w = find_window(c, m->window)) && w->role == VB_ROLE_NORMAL && w->state == VB_STATE_NORMAL &&
+            (mouse_buttons & VB_BUTTON_LEFT) && (m->a & 15))
+            start_resize(w, (uint32_t)m->a & 15u);
+        break;
+    case VB_CURSOR:
+        if ((w = find_window(c, m->window)))
+            w->cursor = m->a >= 0 && m->a < VB_CURSOR_COUNT ? m->a : VB_CURSOR_ARROW;
         break;
     case VB_TITLE:
         if ((w = find_window(c, m->window))) {
@@ -644,19 +978,8 @@ static void handle_request(struct client *c, const struct vb_msg *m)
         }
         break;
     case VB_MINIMIZE:
-        if ((w = find_any(m->window)) && w->role == VB_ROLE_NORMAL && !w->minimized) {
-            damage_window_frame(w);
-            w->minimized = true;
-            if (hovered == w)
-                hovered = NULL;
-            if (grab == w)
-                grab = NULL;
-            if (drag == w)
-                drag = NULL;
-            if (focused == w)
-                set_focus(next_focus(w));
-            send_task(w);
-        }
+        if ((w = find_any(m->window)))
+            minimize_window(w);
         break;
     default:
         break;
@@ -722,6 +1045,34 @@ static void handle_mouse(const struct input_record *r)
     mouse_x = nx;
     mouse_y = ny;
     mouse_buttons = r->buttons;
+    if (resize_w) {
+        struct window *w = resize_w;
+        int dx = mouse_x - resize_mx, dy = mouse_y - resize_my;
+        int x0 = resize_x, y0 = resize_y, x1 = resize_x + resize_ww, y1 = resize_y + resize_hh;
+        if (resize_edges & VB_EDGE_LEFT)
+            x0 = clampi(x0 + dx, x1 - VB_MAX_SIZE, x1 - MIN_W);
+        if (resize_edges & VB_EDGE_RIGHT)
+            x1 = clampi(x1 + dx, x0 + MIN_W, x0 + VB_MAX_SIZE);
+        if (resize_edges & VB_EDGE_TOP) {
+            int lo = y1 - VB_MAX_SIZE > workarea.y0 ? y1 - VB_MAX_SIZE : workarea.y0;
+            y0 = clampi(y0 + dy, lo, y1 - MIN_H);
+        }
+        if (resize_edges & VB_EDGE_BOTTOM)
+            y1 = clampi(y1 + dy, y0 + MIN_H, y0 + VB_MAX_SIZE);
+        bool done = !(mouse_buttons & VB_BUTTON_LEFT);
+        uint64_t now = now_ms();
+        bool changed_size = !w->pending || w->pend_x != x0 || w->pend_y != y0 || w->pend_w != x1 - x0 ||
+                            w->pend_h != y1 - y0;
+        if (changed_size && (done || now - resize_sent >= CONFIGURE_MS)) {
+            send_configure(w, x0, y0, x1 - x0, y1 - y0);
+            resize_sent = now;
+        }
+        if (done) {
+            resize_w = NULL;
+            pointer_to(w, changed, 0);
+        }
+        return;
+    }
     if (drag) {
         damage_window_frame(drag);
         drag->x = mouse_x - drag_dx;
@@ -731,7 +1082,7 @@ static void handle_mouse(const struct input_record *r)
         damage_window_frame(drag);
         if (!(mouse_buttons & VB_BUTTON_LEFT)) {
             pointer_to(drag, changed, 0);
-            send_event(drag, VB_CONFIGURE, drag->x, drag->y, 0, 0, 0);
+            send_event(drag, VB_CONFIGURE, drag->x, drag->y, 0, 0, (uint32_t)drag->state);
             drag = NULL;
         }
         return;
@@ -795,6 +1146,17 @@ static void handle_key(const struct input_record *r)
     }
     if (r->pressed && alt && !ctrl && r->scancode == HID_TAB) {
         cycle_focus();
+        return;
+    }
+    bool gui = mods & VB_MOD_GUI;
+    if (r->pressed && gui && focused && focused->role == VB_ROLE_NORMAL && focused->owner &&
+        focused->owner->version >= 3 && (r->scancode == HID_UP || r->scancode == HID_DOWN)) {
+        if (r->scancode == HID_UP)
+            set_state(focused, VB_STATE_MAXIMIZED);
+        else if (focused->state != VB_STATE_NORMAL)
+            set_state(focused, VB_STATE_NORMAL);
+        else
+            set_state(focused, VB_STATE_MINIMIZED);
         return;
     }
     if (focused)
