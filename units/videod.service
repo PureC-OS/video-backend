@@ -1,0 +1,11 @@
+[Unit]
+Description=Video Backend (display server)
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/videod
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target
