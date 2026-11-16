@@ -44,6 +44,7 @@ enum vb_reply {
     VB_TASK,
     VB_TASK_GONE,
     VB_POPUP_DONE,
+    VB_CONFIGURE,
 };
 
 enum vb_error {
@@ -106,4 +107,5 @@ struct vb_msg {
  *   TASK     window=task id, a=VB_TASK_* flags, text=title (new or changed)
  *   TASK_GONE window=task id
  *   POPUP_DONE window: a click landed outside this popup
+ *   CONFIGURE window, a=x b=y: the window was moved (sent when a move ends)
  */

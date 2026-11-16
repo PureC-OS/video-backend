@@ -17,6 +17,7 @@ enum vb_event_type {
     VB_EVENT_TASK,
     VB_EVENT_TASK_GONE,
     VB_EVENT_POPUP_DONE,
+    VB_EVENT_CONFIGURE,
 };
 
 struct vb_event {
@@ -49,6 +50,7 @@ void vb_tasks_subscribe(void);
 void vb_task_activate(uint32_t task_id);
 void vb_task_minimize(uint32_t task_id);
 uint32_t vb_window_id(const struct vb_window *window);
+void vb_window_position(const struct vb_window *window, int *x, int *y);
 void vb_window_destroy(struct vb_window *window);
 uint32_t *vb_window_pixels(struct vb_window *window);
 int vb_window_width(const struct vb_window *window);

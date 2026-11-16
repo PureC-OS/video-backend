@@ -689,6 +689,7 @@ static void handle_mouse(const struct input_record *r)
         damage_window_frame(drag);
         if (!(mouse_buttons & VB_BUTTON_LEFT)) {
             pointer_to(drag, changed, 0);
+            send_event(drag, VB_CONFIGURE, drag->x, drag->y, 0, 0, 0);
             drag = NULL;
         }
         return;

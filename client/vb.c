@@ -14,6 +14,7 @@
 
 struct vb_window {
     uint32_t id;
+    int x, y;
     int width, height;
     uint32_t *pixels;
     size_t bytes;
@@ -190,6 +191,14 @@ uint32_t vb_window_id(const struct vb_window *w)
     return w ? w->id : 0;
 }
 
+void vb_window_position(const struct vb_window *w, int *x, int *y)
+{
+    if (x)
+        *x = w ? w->x : 0;
+    if (y)
+        *y = w ? w->y : 0;
+}
+
 static struct vb_window *create(int x, int y, int width, int height, const char *title, int role);
 
 struct vb_window *vb_window_create_at(int x, int y, int width, int height, const char *title)
@@ -253,6 +262,8 @@ static struct vb_window *create(int x, int y, int width, int height, const char 
         return NULL;
     }
     w->id = r.window;
+    w->x = r.a;
+    w->y = r.b;
     w->next = windows;
     windows = w;
     if (title)
@@ -413,6 +424,15 @@ static bool convert(const struct vb_msg *m, struct vb_event *e)
         break;
     case VB_POPUP_DONE:
         e->type = VB_EVENT_POPUP_DONE;
+        break;
+    case VB_CONFIGURE:
+        e->type = VB_EVENT_CONFIGURE;
+        e->x = m->a;
+        e->y = m->b;
+        if (e->window) {
+            e->window->x = m->a;
+            e->window->y = m->b;
+        }
         break;
     case VB_WORKAREA:
         work_x = m->a;
