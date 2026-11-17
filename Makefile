@@ -12,7 +12,7 @@ LINKER_SCRIPT := $(ROOT_DIR)/linker-userspace.ld
 
 CFLAGS := $(CPPFLAGS) -I$(ROOT_DIR)/src/libc/include/hosted -I$(CURDIR)/include $(USER_CFLAGS) -O2 -Wall -Wextra $(DEPFLAGS)
 
-PROGRAMS := $(OUT)/videod $(OUT)/vb-demo
+PROGRAMS := $(OUT)/videod
 LIBVB := $(OUT)/libvb.a
 
 .PHONY: all clean package
@@ -30,9 +30,6 @@ $(LIBVB): $(OBJ)/client/vb.o
 $(OUT)/videod: $(OBJ)/server/videod.o $(CRT0) $(LIBPUREC) $(LINKER_SCRIPT)
 	$(LD) -T $(LINKER_SCRIPT) -o $@ $(CRT0) $(OBJ)/server/videod.o $(LIBPUREC)
 
-$(OUT)/vb-demo: $(OBJ)/demo/vb-demo.o $(LIBVB) $(CRT0) $(LIBPUREC) $(LINKER_SCRIPT)
-	$(LD) -T $(LINKER_SCRIPT) -o $@ $(CRT0) $(OBJ)/demo/vb-demo.o $(LIBVB) $(LIBPUREC)
-
 $(CRT0) $(LIBPUREC):
 	$(MAKE) -C $(ROOT_DIR)/src/libc
 
@@ -44,7 +41,6 @@ package: all
 	python3 $(ROOT_DIR)/mk/pkg/mkpkg.py --name video-backend --version $(VERSION)-$(PKGREL) \
 		--desc "Display server (videod) and its client library" -o $(OUT) \
 		--file usr/bin/videod=$(OUT)/videod \
-		--file usr/bin/vb-demo=$(OUT)/vb-demo \
 		--file usr/lib/libvb.a=$(LIBVB) \
 		--file usr/include/vb.h=$(CURDIR)/include/vb.h \
 		--file usr/include/vb_proto.h=$(CURDIR)/include/vb_proto.h \

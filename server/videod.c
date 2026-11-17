@@ -353,12 +353,6 @@ static void compose_rect(const struct rect *r)
     }
 }
 
-static void copy_to_fb(const struct rect *r)
-{
-    for (int y = r->y0; y < r->y1; y++)
-        memcpy(fb_row(y) + r->x0, back + (size_t)y * (size_t)screen_w + r->x0, (size_t)(r->x1 - r->x0) * 4);
-}
-
 static int wanted_cursor(void)
 {
     if (resize_w) {
@@ -374,32 +368,50 @@ static int wanted_cursor(void)
     return w ? w->cursor : VB_CURSOR_ARROW;
 }
 
-static void draw_cursor(void)
-{
-    const struct cursor_def *d = &cursors[cursor_kind];
-    for (int cy = 0; cy < d->h; cy++) {
-        int y = cursor_box.y0 + cy;
-        if (y < 0 || y >= screen_h)
-            continue;
-        uint32_t *line = fb_row(y);
-        for (int cx = 0; cx < d->w; cx++) {
-            int x = cursor_box.x0 + cx;
-            char c = d->rows[cy][cx];
-            if (x < 0 || x >= screen_w || c == ' ')
-                continue;
-            line[x] = c == 'X' ? 0x000000u : 0xFFFFFFu;
-        }
-    }
-}
-
-static void damage_box(const struct rect *b)
+static void present(const struct rect *b)
 {
     struct rect r = {clampi(b->x0, 0, screen_w), clampi(b->y0, 0, screen_h), clampi(b->x1, 0, screen_w),
                      clampi(b->y1, 0, screen_h)};
-    if (r.x0 < r.x1 && r.y0 < r.y1) {
-        copy_to_fb(&r);
-        pc_fb_damage((uint32_t)r.x0, (uint32_t)r.y0, (uint32_t)(r.x1 - r.x0), (uint32_t)(r.y1 - r.y0));
+    if (r.x0 >= r.x1 || r.y0 >= r.y1)
+        return;
+    const struct cursor_def *d = &cursors[cursor_kind];
+    for (int y = r.y0; y < r.y1; y++) {
+        uint32_t *dst = fb_row(y) + r.x0;
+        const uint32_t *src = back + (size_t)y * (size_t)screen_w + r.x0;
+        int cy = y - cursor_box.y0;
+        if (!cursor_shown || cy < 0 || cy >= d->h || cursor_box.x1 <= r.x0 || cursor_box.x0 >= r.x1) {
+            memcpy(dst, src, (size_t)(r.x1 - r.x0) * 4);
+            continue;
+        }
+        static uint32_t line[VB_MAX_SIZE];
+        int n = r.x1 - r.x0;
+        memcpy(line, src, (size_t)n * 4);
+        for (int cx = 0; cx < d->w; cx++) {
+            int x = cursor_box.x0 + cx;
+            char c = d->rows[cy][cx];
+            if (x < r.x0 || x >= r.x1 || c == ' ')
+                continue;
+            line[x - r.x0] = c == 'X' ? 0x000000u : 0xFFFFFFu;
+        }
+        memcpy(dst, line, (size_t)n * 4);
     }
+    pc_fb_damage((uint32_t)r.x0, (uint32_t)r.y0, (uint32_t)(r.x1 - r.x0), (uint32_t)(r.y1 - r.y0));
+}
+
+static struct rect join(struct rect a, struct rect b)
+{
+    if (a.x0 >= a.x1 || a.y0 >= a.y1)
+        return b;
+    if (b.x0 >= b.x1 || b.y0 >= b.y1)
+        return a;
+    struct rect r = {a.x0 < b.x0 ? a.x0 : b.x0, a.y0 < b.y0 ? a.y0 : b.y0, a.x1 > b.x1 ? a.x1 : b.x1,
+                     a.y1 > b.y1 ? a.y1 : b.y1};
+    return r;
+}
+
+static bool near(struct rect a, struct rect b)
+{
+    return a.x0 < b.x1 + 64 && b.x0 < a.x1 + 64 && a.y0 < b.y1 + 64 && b.y0 < a.y1 + 64;
 }
 
 static void flush(void)
@@ -410,28 +422,32 @@ static void flush(void)
     const struct cursor_def *d = &cursors[kind];
     struct rect box = {mouse_x - d->hx, mouse_y - d->hy, mouse_x - d->hx + d->w, mouse_y - d->hy + d->h};
     bool moved = !cursor_shown || kind != cursor_kind || memcmp(&box, &cursor_box, sizeof(box)) != 0;
+    bool had_shown = cursor_shown;
     struct rect old = cursor_box;
-    bool had_dirty = dirty.x0 < dirty.x1;
-    if (had_dirty) {
-        compose_rect(&dirty);
-        copy_to_fb(&dirty);
-        pc_fb_damage((uint32_t)dirty.x0, (uint32_t)dirty.y0, (uint32_t)(dirty.x1 - dirty.x0),
-                     (uint32_t)(dirty.y1 - dirty.y0));
-    }
-    bool overlap = had_dirty && old.x0 < dirty.x1 && old.x1 > dirty.x0 && old.y0 < dirty.y1 && old.y1 > dirty.y0;
+    struct rect area = dirty;
     dirty.x0 = dirty.x1 = 0;
-    if (!moved && !overlap)
+    bool had_dirty = area.x0 < area.x1;
+    if (had_dirty)
+        compose_rect(&area);
+    if (!had_dirty && !moved)
         return;
-    if (cursor_shown && moved)
-        damage_box(&old);
     cursor_box = box;
     cursor_kind = kind;
     cursor_shown = true;
-    draw_cursor();
-    struct rect r = {clampi(box.x0, 0, screen_w), clampi(box.y0, 0, screen_h), clampi(box.x1, 0, screen_w),
-                     clampi(box.y1, 0, screen_h)};
-    if (r.x0 < r.x1 && r.y0 < r.y1)
-        pc_fb_damage((uint32_t)r.x0, (uint32_t)r.y0, (uint32_t)(r.x1 - r.x0), (uint32_t)(r.y1 - r.y0));
+    if (!moved) {
+        present(&area);
+        return;
+    }
+    struct rect cursors_area = had_shown ? (near(old, box) ? join(old, box) : old) : box;
+    if (had_dirty && near(area, cursors_area))
+        area = join(area, cursors_area);
+    else if (had_dirty)
+        present(&area), area = cursors_area;
+    else
+        area = cursors_area;
+    present(&area);
+    if (had_shown && !near(old, box))
+        present(&box);
 }
 
 static void send_msg(struct client *c, const struct vb_msg *m)

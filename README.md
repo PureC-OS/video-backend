@@ -9,22 +9,24 @@ windows and talk to it over `/run/videod.sock` with `libvb`.
 
 From the PureC-OS tree (this repository is its `video-backend` submodule):
 
-    make -C video-backend            # bin/video-backend/{videod,vb-demo,libvb.a}
+    make -C video-backend            # bin/video-backend/{videod,libvb.a}
     make -C video-backend package    # video-backend-VERSION-1-x86_64.pkg.tar.gz (+ .sig)
 
-Attach the package and its `.sig` to a GitHub release, then on PureC OS:
+Publish the package with `mk/pkg/publish.py --registry Trusted` (or attach it
+and its `.sig` to a GitHub release), then on PureC OS:
 
     pkg -Sy && pkg -S video-backend
     systemctl start videod           # or: systemctl set-default graphical.target
-    vb-demo 3
 
 ## How it works
 
 - Window contents live in shared memory (`shm_open`, XRGB, created by the
   client); the client sends `DAMAGE` with the changed rectangle.
-- videod composes the windows (z-order, 1 px border, focused one in blue)
-  in a back buffer, copies the changed part to the framebuffer and draws the
-  pointer on top.
+- videod composes the windows (z-order; protocol v1/v2 clients get a 1 px
+  border, the focused one in blue) in a back buffer. Only finished frames
+  reach the framebuffer: the changed rows are copied from the back buffer
+  with the pointer already laid over them, so the screen never shows a frame
+  without the pointer or a half-drawn update.
 - Input: keys go to the focused window, pointer events to the window under
   the pointer (or the one that got the button press). Click raises and
   focuses.
