@@ -10,7 +10,7 @@ LIBPUREC := $(LIB_DIR)/libpurec.a
 CRT0 := $(LIB_DIR)/crt0.o
 LINKER_SCRIPT := $(ROOT_DIR)/linker-userspace.ld
 
-CFLAGS := $(CPPFLAGS) -I$(ROOT_DIR)/src/libc/include/hosted -I$(CURDIR)/include $(USER_CFLAGS) -O2 -Wall -Wextra $(DEPFLAGS)
+CFLAGS := $(CPPFLAGS) -I$(LIBC_DIR)/include/hosted -I$(CURDIR)/include $(USER_CFLAGS) -O2 -Wall -Wextra $(DEPFLAGS)
 
 PROGRAMS := $(OUT)/videod
 LIBVB := $(OUT)/libvb.a
@@ -31,7 +31,7 @@ $(OUT)/videod: $(OBJ)/server/videod.o $(CRT0) $(LIBPUREC) $(LINKER_SCRIPT)
 	$(LD) -T $(LINKER_SCRIPT) -o $@ $(CRT0) $(OBJ)/server/videod.o $(LIBPUREC)
 
 $(CRT0) $(LIBPUREC):
-	$(MAKE) -C $(ROOT_DIR)/src/libc
+	$(MAKE) -C $(LIBC_DIR)
 
 PKG_FILE := $(OUT)/video-backend-$(VERSION)-$(PKGREL)-x86_64.pkg.tar.gz
 SIGN_KEY ?= $(HOME)/.config/purec-pkg/signing.pem
